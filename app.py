@@ -58,7 +58,6 @@ def parse_real_estate_text(full_text):
 
     return data
 
-# ✨ 加上了記憶吐司 (快取)，不管怎麼打字都不會再重新讀取圖片了！
 @st.cache_data
 def process_uploaded_file(file_bytes, file_name):
     full_text = ""
@@ -73,7 +72,6 @@ def process_uploaded_file(file_bytes, file_name):
         full_text = pytesseract.image_to_string(image, lang='chi_tra') 
     return parse_real_estate_text(full_text), full_text
 
-# ✨ 圖片預覽也加上快取，保證秒速載入
 @st.cache_data
 def generate_preview_html(file_bytes, file_name):
     file_type = file_name.split('.')[-1].lower()
@@ -93,8 +91,9 @@ def generate_preview_html(file_bytes, file_name):
         image.save(buffered, format="JPEG")
         img_b64 = base64.b64encode(buffered.getvalue()).decode()
         uid = str(uuid.uuid4())[:8]
-        html_code = f"""
-        <div id="container-{uid}" style="overflow: hidden; cursor: zoom-in; border-radius: 8px; border: 1px solid #ddd;">
+        
+        # ✨ 修正：確保 HTML 標籤從第一行最前面開始，避免被誤判為純文字
+        html_code = f"""<div id="container-{uid}" style="overflow: hidden; cursor: zoom-in; border-radius: 8px; border: 1px solid #ddd; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
             <img id="img-{uid}" src="data:image/jpeg;base64,{img_b64}" style="width: 100%; transition: transform 0.1s ease;">
         </div>
         <script>
@@ -113,7 +112,9 @@ def generate_preview_html(file_bytes, file_name):
                     img.style.transformOrigin = 'center center';
                 }});
             }})();
-        </script> """
+        </script>
+        <p style="color: gray; font-size: 14px; margin-top: 8px;">🔍 提示：將滑鼠移至上方圖片，即可像放大鏡般檢視字體與細節！</p>
+        """
         return html_code
     return ""
 
@@ -137,7 +138,9 @@ with col_left:
     if uploaded_file:
         file_bytes = uploaded_file.getvalue()
         preview_content = generate_preview_html(file_bytes, uploaded_file.name)
-        if preview_content.startswith("<div"):
+        
+        # ✨ 修正：使用更穩定的判斷方式，只要裡面有 <div 就當成 HTML 渲染
+        if "<div" in preview_content:
             st.markdown(preview_content, unsafe_allow_html=True)
         else:
             st.warning(preview_content)
