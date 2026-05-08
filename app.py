@@ -47,7 +47,6 @@ def parse_real_estate_text(full_text):
     floor_match = re.search(r"總樓層[:：\s]*(\d+)層.*出售樓層[:：\s]*(\d+)層", full_text, re.S)
     data['floor'] = f"{floor_match.group(2)}/{floor_match.group(1)} 樓" if floor_match else ""
 
-    # ✨ 新增抓取：屋齡、管理費、面向
     age_match = re.search(r"(?:屋齡|建築完成日)[:：\s]*([0-9\./年]+)", full_text)
     data['age'] = age_match.group(1).strip() if age_match else ""
     
@@ -59,31 +58,35 @@ def parse_real_estate_text(full_text):
 
     return data
 
-def process_uploaded_file(file):
+# ✨ 加上了記憶吐司 (快取)，不管怎麼打字都不會再重新讀取圖片了！
+@st.cache_data
+def process_uploaded_file(file_bytes, file_name):
     full_text = ""
-    file_type = file.name.split('.')[-1].lower()
+    file_type = file_name.split('.')[-1].lower()
     if file_type == 'pdf':
-        with pdfplumber.open(file) as pdf:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for page in pdf.pages:
                 text = page.extract_text()
                 if text: full_text += text + "\n"
     elif file_type in ['jpg', 'jpeg', 'png']:
-        image = Image.open(file)
+        image = Image.open(io.BytesIO(file_bytes))
         full_text = pytesseract.image_to_string(image, lang='chi_tra') 
     return parse_real_estate_text(full_text), full_text
 
-def display_preview(file):
-    file_type = file.name.split('.')[-1].lower()
+# ✨ 圖片預覽也加上快取，保證秒速載入
+@st.cache_data
+def generate_preview_html(file_bytes, file_name):
+    file_type = file_name.split('.')[-1].lower()
     image = None
     if file_type in ['jpg', 'jpeg', 'png']:
-        image = Image.open(file)
+        image = Image.open(io.BytesIO(file_bytes))
     elif file_type == 'pdf':
         try:
-            with pdfplumber.open(file) as pdf:
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
                 image = pdf.pages[0].to_image(resolution=150).original
         except Exception:
-            st.warning("📄 PDF 已上傳 (右側數據分析正常運作中)")
-            return
+            return "📄 PDF 已上傳 (右側數據分析正常運作中)"
+            
     if image:
         if image.mode != 'RGB': image = image.convert('RGB')
         buffered = io.BytesIO()
@@ -111,7 +114,8 @@ def display_preview(file):
                 }});
             }})();
         </script> """
-        st.markdown(html_code, unsafe_allow_html=True)
+        return html_code
+    return ""
 
 KEYWORD_OPTIMIZER = {
     "全聯": "全聯福利中心", "家樂福": "家樂福", "國民小學": "國小", "國民中學": "國中",
@@ -131,15 +135,19 @@ extracted_raw_text = ""
 with col_left:
     st.header("👁️ 原始資料預覽")
     if uploaded_file:
-        display_preview(uploaded_file)
-        auto_data, extracted_raw_text = process_uploaded_file(uploaded_file)
+        file_bytes = uploaded_file.getvalue()
+        preview_content = generate_preview_html(file_bytes, uploaded_file.name)
+        if preview_content.startswith("<div"):
+            st.markdown(preview_content, unsafe_allow_html=True)
+        else:
+            st.warning(preview_content)
+            
+        auto_data, extracted_raw_text = process_uploaded_file(file_bytes, uploaded_file.name)
     else:
         st.info("請上傳檔案")
 
 with col_right:
     st.title("🏠 房仲文案戰鬥面板")
-    
-    # ✨ 更新：1. 確認房屋詳細資訊 (加入新欄位)
     st.header("1. 確認房屋詳細資訊")
     r_col1, r_col2, r_col3 = st.columns(3)
     
@@ -235,7 +243,6 @@ with col_right:
     with con2:
         u_store, u_license = st.text_input("🏪 店名", "捷運樂善直營店"), st.text_input("🪪 字號")
 
-    # ✨ 更新：6. 生成文案 (將新欄位排版進文案中)
     if st.button("✨ 一鍵生成廣告", type="primary"):
         styles = {"溫馨家庭風": ("【這不是賣房子，是為您尋找更好的生活】", "現場的溫度才是房子的靈魂。"), "霸氣尊榮風": ("【頂級視野，專屬品味】", "尊榮感親臨現場方能領略。"), "投資精算風": ("【精準眼光，資產翻倍】", "數字會說話，搶佔增值先機。"), "誠懇務實風": ("【實實在在的好房子】", "陪您挑選最適合的家。")}
         intro, outro = (c_intro, "") if "自訂" in ad_style else styles.get(ad_style)
@@ -243,7 +250,6 @@ with col_right:
         adv_txt = "--- ✨ 本案優勢 ---\n" + "\n".join([f"🔥 {a}" for a in advs if a]) + "\n\n" if any(advs) else ""
         ame_txt = "--- 📍 周邊機能 ---\n" + "\n".join([f"✅ {v}" for v in amenity_details.values()]) + "\n\n" if amenity_details else ""
         
-        # 組合車位文字 (如果有填寫坪數才顯示)
         parking_text = f"{parking_type} ({parking_area} 坪)" if parking_area else parking_type
         
         final_text = f"""
