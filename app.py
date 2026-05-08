@@ -8,6 +8,8 @@ from PIL import Image
 import io
 import base64
 import uuid
+import requests
+from bs4 import BeautifulSoup
 
 # --- 頁面配置 ---
 st.set_page_config(page_title="昭佑的房仲文案戰鬥面板", layout="wide", initial_sidebar_state="expanded")
@@ -15,7 +17,10 @@ st.set_page_config(page_title="昭佑的房仲文案戰鬥面板", layout="wide"
 # --- 核心數據抓取邏輯 ---
 def parse_real_estate_text(full_text):
     data = {}
-    all_prices = re.findall(r"(\d{3,5})[\s\n售價]*萬", full_text)
+    
+    # 金額處理 (包含 591 常見的 "1,200 萬" 格式)
+    clean_text_for_price = full_text.replace(",", "")
+    all_prices = re.findall(r"(\d{3,5})[\s\n售價]*萬", clean_text_for_price)
     data['price'] = str(max([int(p) for p in all_prices])) if all_prices else ""
     
     addr_match = re.search(r"(?:物件)?(?:地址|位置|座落|門牌)[:：\s]*(.*?)(?=[\n\(（]|電話|$)", full_text)
@@ -35,17 +40,25 @@ def parse_real_estate_text(full_text):
         match = re.search(rf"{keyword}[:：\s]*([\d\.]+)坪", text)
         return match.group(1) if match else ""
         
-    data['main'] = find_val("主建物", full_text)
+    data['main'] = find_val("(?:主建物|室內)", full_text)
     data['sub'] = find_val("附屬建物", full_text)
-    data['public'] = find_val("公\s*設", full_text) 
+    data['public'] = find_val("(?:公\s*設|共有部分)", full_text) 
     data['parking'] = find_val("車\s*位", full_text)
-    data['total'] = find_val("總坪數", full_text)
+    
+    # 總坪數 (包含 591 的 "權狀坪數")
+    total_match = re.search(r"(?:總坪數|權狀坪數)[:：\s]*([\d\.]+)坪", full_text)
+    data['total'] = total_match.group(1) if total_match else find_val("總坪數", full_text)
     
     ratio_match = re.search(r"公設比[:：\s]*([\d\.]+)%", full_text)
     data['ratio'] = ratio_match.group(1) if ratio_match else ""
     
     floor_match = re.search(r"總樓層[:：\s]*(\d+)層.*出售樓層[:：\s]*(\d+)層", full_text, re.S)
-    data['floor'] = f"{floor_match.group(2)}/{floor_match.group(1)} 樓" if floor_match else ""
+    if not floor_match:
+        # 抓取 591 常見格式 "樓層 2F/15F"
+        floor_match = re.search(r"樓層[:：\s]*(\d+)[Ff樓]\s*/\s*(\d+)[Ff樓]", full_text)
+        data['floor'] = f"{floor_match.group(1)}/{floor_match.group(2)} 樓" if floor_match else ""
+    else:
+        data['floor'] = f"{floor_match.group(2)}/{floor_match.group(1)} 樓"
 
     age_match = re.search(r"(?:屋齡|建築完成日)[:：\s]*([0-9\./年]+)", full_text)
     data['age'] = age_match.group(1).strip() if age_match else ""
@@ -53,7 +66,7 @@ def parse_real_estate_text(full_text):
     fee_match = re.search(r"管理費[:：\s]*([0-9,]+)", full_text)
     data['fee'] = fee_match.group(1).strip() if fee_match else ""
     
-    ori_match = re.search(r"(?:座向|面向)[:：\s]*([座朝東西南北]+)", full_text)
+    ori_match = re.search(r"(?:座向|面向|朝向)[:：\s]*([座朝東西南北]+)", full_text)
     data['orientation'] = ori_match.group(1).strip() if ori_match else ""
 
     return data
@@ -71,6 +84,27 @@ def process_uploaded_file(file_bytes, file_name):
         image = Image.open(io.BytesIO(file_bytes))
         full_text = pytesseract.image_to_string(image, lang='chi_tra') 
     return parse_real_estate_text(full_text), full_text
+
+# ✨ 新增：網址爬蟲處理功能 (加入快取)
+@st.cache_data
+def process_url(url):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # 移除干擾的程式碼標籤
+        for script in soup(["script", "style"]):
+            script.extract()
+            
+        # 提取網頁所有文字
+        raw_text = soup.get_text(separator='\n', strip=True)
+        return parse_real_estate_text(raw_text), raw_text
+    except Exception as e:
+        return None, str(e)
 
 @st.cache_data
 def generate_preview_html(file_bytes, file_name):
@@ -92,7 +126,6 @@ def generate_preview_html(file_bytes, file_name):
         img_b64 = base64.b64encode(buffered.getvalue()).decode()
         uid = str(uuid.uuid4())[:8]
         
-        # ✨ 修正：確保 HTML 標籤從第一行最前面開始，避免被誤判為純文字
         html_code = f"""<div id="container-{uid}" style="overflow: hidden; cursor: zoom-in; border-radius: 8px; border: 1px solid #ddd; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
             <img id="img-{uid}" src="data:image/jpeg;base64,{img_b64}" style="width: 100%; transition: transform 0.1s ease;">
         </div>
@@ -125,8 +158,13 @@ KEYWORD_OPTIMIZER = {
 }
 
 # --- UI 介面 ---
-st.sidebar.title("⚙️ 系統設定")
+st.sidebar.title("⚙️ 系統設定與輸入")
 api_key = st.sidebar.text_input("🔑 Google Maps API Key", type="password")
+
+st.sidebar.markdown("---")
+# ✨ 新增網址輸入框
+target_url = st.sidebar.text_input("🔗 貼上房屋網址 (如 591 連結自動抓取)")
+st.sidebar.markdown("<div style='text-align: center; color: gray;'>或</div>", unsafe_allow_html=True)
 uploaded_file = st.sidebar.file_uploader("📂 上傳物件資料表", type=['pdf', 'jpg', 'jpeg', 'png'])
 
 col_left, col_right = st.columns([3, 7])
@@ -135,11 +173,22 @@ extracted_raw_text = ""
 
 with col_left:
     st.header("👁️ 原始資料預覽")
-    if uploaded_file:
+    
+    # 判斷是使用網址還是上傳檔案
+    if target_url:
+        with st.spinner("🌐 正在潛入網頁抓取資料中..."):
+            auto_data, extracted_raw_text = process_url(target_url)
+            if auto_data is not None:
+                st.success("✅ 網址解析完成！已盡量從網頁中萃取數據。")
+                st.info("💡 提示：網頁抓取不會產生圖片預覽，請直接核對右側面板數據。")
+                st.markdown(f"👉 [點擊此處開啟原網頁]({target_url})")
+            else:
+                st.error(f"❌ 網址解析失敗，可能是網站阻擋爬蟲。錯誤訊息：{extracted_raw_text}")
+                
+    elif uploaded_file:
         file_bytes = uploaded_file.getvalue()
         preview_content = generate_preview_html(file_bytes, uploaded_file.name)
         
-        # ✨ 修正：使用更穩定的判斷方式，只要裡面有 <div 就當成 HTML 渲染
         if "<div" in preview_content:
             st.markdown(preview_content, unsafe_allow_html=True)
         else:
@@ -147,7 +196,7 @@ with col_left:
             
         auto_data, extracted_raw_text = process_uploaded_file(file_bytes, uploaded_file.name)
     else:
-        st.info("請上傳檔案")
+        st.info("請於左側輸入網址，或上傳檔案。")
 
 with col_right:
     st.title("🏠 房仲文案戰鬥面板")
@@ -190,7 +239,7 @@ with col_right:
     with c_c: sel_park = st.multiselect("🌳 休閒", standard_amenities["🌳 休閒"])
     with c_d: sel_school = st.multiselect("🏫 教育", standard_amenities["🏫 教育"])
     with c_e: sel_baby = st.multiselect("👶 育兒", standard_amenities["👶 育兒"])
-    selected_list = sel_shopping + sel_traffic + sel_park + sel_school + sel_baby
+    selected_list = sel_shopping + sel_traffic + sel_park + school + sel_baby
 
     auto_fetched_data = {}
     if api_key and selected_list and nav_base:
