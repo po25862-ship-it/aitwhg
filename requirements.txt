@@ -3,3 +3,5 @@ pdfplumber
 googlemaps
 pytesseract
 Pillow
+requests
+beautifulsoup4
