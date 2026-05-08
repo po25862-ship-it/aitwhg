@@ -12,58 +12,47 @@ import requests
 from bs4 import BeautifulSoup
 import urllib3
 
-# 關閉略過 SSL 憑證時產生的警告訊息
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- 頁面配置 ---
 st.set_page_config(page_title="昭佑的房仲文案戰鬥面板", layout="wide", initial_sidebar_state="expanded")
 
-# --- 核心數據抓取邏輯 (✨ 開價精準鎖定版) ---
-def parse_real_estate_text(full_text, html_title=""):
+def parse_real_estate_text(full_text, html_title="", specific_price=""):
     data = {}
-    
-    # 清理干擾符號
     text = full_text.replace(",", "").replace("，", "")
     
-    # 1. 價格處理 (不再使用 max，改用更聰明的策略)
-    price_val = ""
+    # 1. 價格處理 (終極精準邏輯)
+    price_val = specific_price # 最優先使用爬蟲直接定位抓到的價格
     
-    # 策略 A: 先找網頁標題 (通常最準確，例如 "XXX - 1280萬 - 台灣房屋")
-    if html_title:
+    if not price_val and html_title:
         title_match = re.search(r"(\d{3,5})\s*萬", html_title.replace(",", ""))
-        if title_match:
-            price_val = title_match.group(1)
+        if title_match: price_val = title_match.group(1)
             
-    # 策略 B: 找明確的標籤 "總價: 1280 萬"
     if not price_val:
         tag_match = re.search(r"(?:總價|售價|開價|建議售價)[:：\s\$]*(\d{3,5})(?:\s*萬)?", text)
-        if tag_match:
-            price_val = tag_match.group(1)
+        if tag_match: price_val = tag_match.group(1)
             
-    # 策略 C: 抓取文章中第一個出現的合理總價 (放棄用 max，避免抓到下方推薦物件)
     if not price_val:
         all_prices = re.findall(r"(\d{3,5})[\s\n]*(?:萬|W)", text)
-        valid_prices = [p for p in all_prices if int(p) > 100] # 過濾掉單價或車位
-        if valid_prices:
-            price_val = valid_prices[0] # 取第一個，通常是最上面的主角
+        valid_prices = [p for p in all_prices if int(p) > 100]
+        if valid_prices: price_val = valid_prices[0]
             
     data['price'] = price_val
     
-    # 建立一個通用的找數值函數
     def find_val(keywords, txt):
-        match = re.search(rf"(?:{keywords})[:：\s]*([\d\.]+)\s*坪", txt)
+        # 支援小數點，且支援「建坪 27.39 坪」或「主+陽 17.5 坪」等寫法
+        match = re.search(rf"(?:{keywords})[:：\s]*([\d\.]+)\s*坪?", txt)
         return match.group(1) if match else ""
         
     data['total'] = find_val("權狀坪數|總坪數|坪數|權狀|建坪|建物總坪數|登記建坪", text)
-    data['main'] = find_val("主建物|室內|主建物小計", text)
+    data['main'] = find_val("主建物|室內|主建物小計|主\+陽", text)
     data['sub'] = find_val("附屬建物|陽台|附屬建物小計", text)
-    data['public'] = find_val("公設|共有部分|共同使用小計|公共設施|公共空間", text)
+    # ✨ 已經包含「共同使用」
+    data['public'] = find_val("公設|共有部分|共同使用小計|共同使用|公共設施|公共空間", text)
     data['parking'] = find_val("車位|車位坪數", text)
     
     ratio_match = re.search(r"公設比[:：\s]*([\d\.]+)%", text)
     data['ratio'] = ratio_match.group(1) if ratio_match else ""
     
-    # 樓層 
     floor_match = re.search(r"(?:樓層|出售樓層|所在樓層)[:：\s]*(\d+|B\d+)[Ff樓層]*\s*/\s*(\d+|B\d+)[Ff樓層]*", text)
     if floor_match:
         data['floor'] = f"{floor_match.group(1)}/{floor_match.group(2)} 樓"
@@ -80,7 +69,6 @@ def parse_real_estate_text(full_text, html_title=""):
     ori_match = re.search(r"(?:座向|面向|朝向)[:：\s]*([座朝東西南北]+)", text)
     data['orientation'] = ori_match.group(1) if ori_match else ""
     
-    # 地址尋找優化
     tw_match = re.search(r"([A-Z\u4e00-\u9fa5]{2,3}[縣市][A-Z\u4e00-\u9fa5]{2,3}[鄉鎮市區][A-Z\u4e00-\u9fa50-9]{2,20}(?:路|街|段|巷|弄|號))", text)
     if tw_match:
         address = tw_match.group(1)
@@ -123,15 +111,23 @@ def process_url(url):
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # ✨ 新增：抓取網頁的 Title，用來精準鎖定價格
         html_title = soup.title.string if soup.title else ""
         
+        # ✨ 新增：直接尋找台灣房屋官網的價格大字體標籤 (通常帶有特定的 class)
+        specific_price = ""
+        # 尋找 1,358萬 這種格式的強力抓取
+        price_tags = soup.find_all(string=re.compile(r"^\s*[\d,]+\s*萬\s*$"))
+        if price_tags:
+             # 取第一個找到的，且移除逗號和萬
+             specific_price = price_tags[0].replace(",", "").replace("萬", "").strip()
+
         for element in soup(["script", "style", "nav", "footer"]):
             element.extract()
             
-        raw_text = soup.get_text(separator=' ', strip=True)
+        # 把網頁結構轉換成純文字，加上斷行符號更容易辨識
+        raw_text = soup.get_text(separator=' \n ', strip=True)
         
-        return parse_real_estate_text(raw_text, html_title), raw_text
+        return parse_real_estate_text(raw_text, html_title, specific_price), raw_text
     except Exception as e:
         return None, str(e)
 
