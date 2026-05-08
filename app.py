@@ -10,6 +10,10 @@ import base64
 import uuid
 import requests
 from bs4 import BeautifulSoup
+import urllib3
+
+# ✨ 新增：關閉略過 SSL 憑證時產生的警告訊息
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- 頁面配置 ---
 st.set_page_config(page_title="昭佑的房仲文案戰鬥面板", layout="wide", initial_sidebar_state="expanded")
@@ -18,7 +22,7 @@ st.set_page_config(page_title="昭佑的房仲文案戰鬥面板", layout="wide"
 def parse_real_estate_text(full_text):
     data = {}
     
-    # 金額處理 (包含 591 常見的 "1,200 萬" 格式)
+    # 金額處理
     clean_text_for_price = full_text.replace(",", "")
     all_prices = re.findall(r"(\d{3,5})[\s\n售價]*萬", clean_text_for_price)
     data['price'] = str(max([int(p) for p in all_prices])) if all_prices else ""
@@ -45,7 +49,6 @@ def parse_real_estate_text(full_text):
     data['public'] = find_val("(?:公\s*設|共有部分)", full_text) 
     data['parking'] = find_val("車\s*位", full_text)
     
-    # 總坪數 (包含 591 的 "權狀坪數")
     total_match = re.search(r"(?:總坪數|權狀坪數)[:：\s]*([\d\.]+)坪", full_text)
     data['total'] = total_match.group(1) if total_match else find_val("總坪數", full_text)
     
@@ -54,7 +57,6 @@ def parse_real_estate_text(full_text):
     
     floor_match = re.search(r"總樓層[:：\s]*(\d+)層.*出售樓層[:：\s]*(\d+)層", full_text, re.S)
     if not floor_match:
-        # 抓取 591 常見格式 "樓層 2F/15F"
         floor_match = re.search(r"樓層[:：\s]*(\d+)[Ff樓]\s*/\s*(\d+)[Ff樓]", full_text)
         data['floor'] = f"{floor_match.group(1)}/{floor_match.group(2)} 樓" if floor_match else ""
     else:
@@ -85,22 +87,25 @@ def process_uploaded_file(file_bytes, file_name):
         full_text = pytesseract.image_to_string(image, lang='chi_tra') 
     return parse_real_estate_text(full_text), full_text
 
-# ✨ 新增：網址爬蟲處理功能 (加入快取)
+# ✨ 更新：強化版網頁爬蟲 (加入 verify=False 與更擬真的 Headers)
 @st.cache_data
 def process_url(url):
+    # 終極瀏覽器偽裝
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': 'https://www.google.com/'
     }
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        # 強制略過 SSL 驗證 (verify=False)
+        res = requests.get(url, headers=headers, timeout=15, verify=False)
         res.raise_for_status()
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 移除干擾的程式碼標籤
         for script in soup(["script", "style"]):
             script.extract()
             
-        # 提取網頁所有文字
         raw_text = soup.get_text(separator='\n', strip=True)
         return parse_real_estate_text(raw_text), raw_text
     except Exception as e:
@@ -162,7 +167,6 @@ st.sidebar.title("⚙️ 系統設定與輸入")
 api_key = st.sidebar.text_input("🔑 Google Maps API Key", type="password")
 
 st.sidebar.markdown("---")
-# ✨ 新增網址輸入框
 target_url = st.sidebar.text_input("🔗 貼上房屋網址 (如 591 連結自動抓取)")
 st.sidebar.markdown("<div style='text-align: center; color: gray;'>或</div>", unsafe_allow_html=True)
 uploaded_file = st.sidebar.file_uploader("📂 上傳物件資料表", type=['pdf', 'jpg', 'jpeg', 'png'])
@@ -174,7 +178,6 @@ extracted_raw_text = ""
 with col_left:
     st.header("👁️ 原始資料預覽")
     
-    # 判斷是使用網址還是上傳檔案
     if target_url:
         with st.spinner("🌐 正在潛入網頁抓取資料中..."):
             auto_data, extracted_raw_text = process_url(target_url)
@@ -239,7 +242,7 @@ with col_right:
     with c_c: sel_park = st.multiselect("🌳 休閒", standard_amenities["🌳 休閒"])
     with c_d: sel_school = st.multiselect("🏫 教育", standard_amenities["🏫 教育"])
     with c_e: sel_baby = st.multiselect("👶 育兒", standard_amenities["👶 育兒"])
-    selected_list = sel_shopping + sel_traffic + sel_park + school + sel_baby
+    selected_list = sel_shopping + sel_traffic + sel_park + sel_school + sel_baby
 
     auto_fetched_data = {}
     if api_key and selected_list and nav_base:
