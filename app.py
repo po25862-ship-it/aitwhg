@@ -18,23 +18,42 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # --- 頁面配置 ---
 st.set_page_config(page_title="昭佑的房仲文案戰鬥面板", layout="wide", initial_sidebar_state="expanded")
 
-# --- 核心數據抓取邏輯 (全面升級版：支援台灣房屋官網格式) ---
-def parse_real_estate_text(full_text):
+# --- 核心數據抓取邏輯 (✨ 開價精準鎖定版) ---
+def parse_real_estate_text(full_text, html_title=""):
     data = {}
     
     # 清理干擾符號
     text = full_text.replace(",", "").replace("，", "")
     
-    # 1. 價格
-    all_prices = re.findall(r"(\d{3,5})[\s\n]*(?:萬|W|萬/坪)", text)
-    data['price'] = str(max([int(p) for p in all_prices if int(p) > 100])) if all_prices else ""
+    # 1. 價格處理 (不再使用 max，改用更聰明的策略)
+    price_val = ""
+    
+    # 策略 A: 先找網頁標題 (通常最準確，例如 "XXX - 1280萬 - 台灣房屋")
+    if html_title:
+        title_match = re.search(r"(\d{3,5})\s*萬", html_title.replace(",", ""))
+        if title_match:
+            price_val = title_match.group(1)
+            
+    # 策略 B: 找明確的標籤 "總價: 1280 萬"
+    if not price_val:
+        tag_match = re.search(r"(?:總價|售價|開價|建議售價)[:：\s\$]*(\d{3,5})(?:\s*萬)?", text)
+        if tag_match:
+            price_val = tag_match.group(1)
+            
+    # 策略 C: 抓取文章中第一個出現的合理總價 (放棄用 max，避免抓到下方推薦物件)
+    if not price_val:
+        all_prices = re.findall(r"(\d{3,5})[\s\n]*(?:萬|W)", text)
+        valid_prices = [p for p in all_prices if int(p) > 100] # 過濾掉單價或車位
+        if valid_prices:
+            price_val = valid_prices[0] # 取第一個，通常是最上面的主角
+            
+    data['price'] = price_val
     
     # 建立一個通用的找數值函數
     def find_val(keywords, txt):
         match = re.search(rf"(?:{keywords})[:：\s]*([\d\.]+)\s*坪", txt)
         return match.group(1) if match else ""
         
-    # ✨ 加入台灣房屋官網常用字眼：「建坪」、「登記建坪」
     data['total'] = find_val("權狀坪數|總坪數|坪數|權狀|建坪|建物總坪數|登記建坪", text)
     data['main'] = find_val("主建物|室內|主建物小計", text)
     data['sub'] = find_val("附屬建物|陽台|附屬建物小計", text)
@@ -61,7 +80,7 @@ def parse_real_estate_text(full_text):
     ori_match = re.search(r"(?:座向|面向|朝向)[:：\s]*([座朝東西南北]+)", text)
     data['orientation'] = ori_match.group(1) if ori_match else ""
     
-    # 地址尋找優化：強力搜尋縣市開頭的完整地址
+    # 地址尋找優化
     tw_match = re.search(r"([A-Z\u4e00-\u9fa5]{2,3}[縣市][A-Z\u4e00-\u9fa5]{2,3}[鄉鎮市區][A-Z\u4e00-\u9fa50-9]{2,20}(?:路|街|段|巷|弄|號))", text)
     if tw_match:
         address = tw_match.group(1)
@@ -101,17 +120,18 @@ def process_url(url):
     try:
         res = requests.get(url, headers=headers, timeout=15, verify=False)
         res.raise_for_status()
-        res.encoding = 'utf-8' # 確保中文編碼正確
+        res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 移除選單、腳註等干擾區域
+        # ✨ 新增：抓取網頁的 Title，用來精準鎖定價格
+        html_title = soup.title.string if soup.title else ""
+        
         for element in soup(["script", "style", "nav", "footer"]):
             element.extract()
             
-        # ✨ 讓抓出來的文字之間保持一個空格，防止「建坪」「35坪」黏在一起變成「建坪35坪」導致正則抓不到
         raw_text = soup.get_text(separator=' ', strip=True)
         
-        return parse_real_estate_text(raw_text), raw_text
+        return parse_real_estate_text(raw_text, html_title), raw_text
     except Exception as e:
         return None, str(e)
 
@@ -186,12 +206,9 @@ with col_left:
         with st.spinner("🌐 正在潛入台灣房屋官網抓取資料中..."):
             auto_data, extracted_raw_text = process_url(target_url)
             if auto_data is not None:
-                st.success("✅ 網址解析完成！已盡量從網頁中萃取數據。")
+                st.success("✅ 網頁解析完成！已盡量從網頁中萃取數據。")
                 st.info("💡 提示：網頁抓取不會產生圖片預覽，請直接核對右側面板數據。")
                 st.markdown(f"👉 [點擊此處開啟原網頁]({target_url})")
-                
-                with st.expander("🕵️‍♂️ 顯示網頁抓取到的純文字 (除錯用)"):
-                    st.text(extracted_raw_text)
             else:
                 st.error(f"❌ 網址解析失敗。錯誤訊息：{extracted_raw_text}")
                 
@@ -205,9 +222,6 @@ with col_left:
             st.warning(preview_content)
             
         auto_data, extracted_raw_text = process_uploaded_file(file_bytes, uploaded_file.name)
-        
-        with st.expander("🕵️‍♂️ 顯示 OCR 原始文字"):
-            st.text(extracted_raw_text)
             
     else:
         st.info("請於左側輸入網址，或上傳檔案。")
