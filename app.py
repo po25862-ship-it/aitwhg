@@ -12,64 +12,67 @@ import requests
 from bs4 import BeautifulSoup
 import urllib3
 
-# ✨ 新增：關閉略過 SSL 憑證時產生的警告訊息
+# 關閉略過 SSL 憑證時產生的警告訊息
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- 頁面配置 ---
 st.set_page_config(page_title="昭佑的房仲文案戰鬥面板", layout="wide", initial_sidebar_state="expanded")
 
-# --- 核心數據抓取邏輯 ---
+# --- 核心數據抓取邏輯 (全面升級版) ---
 def parse_real_estate_text(full_text):
     data = {}
     
-    # 金額處理
-    clean_text_for_price = full_text.replace(",", "")
-    all_prices = re.findall(r"(\d{3,5})[\s\n售價]*萬", clean_text_for_price)
-    data['price'] = str(max([int(p) for p in all_prices])) if all_prices else ""
+    # 清理干擾符號
+    text = full_text.replace(",", "").replace("，", "")
     
-    addr_match = re.search(r"(?:物件)?(?:地址|位置|座落|門牌)[:：\s]*(.*?)(?=[\n\(（]|電話|$)", full_text)
-    address = addr_match.group(1).strip() if addr_match else ""
-    if not address:
-        tw_match = re.search(r"([A-Z\u4e00-\u9fa5]{2,3}[縣市][A-Z\u4e00-\u9fa5]{2,3}[鄉鎮市區].+?[路街段].+?號)", full_text)
-        address = tw_match.group(1) if tw_match else ""
-        
-    if "號" in address:
-        clean_address = address.split("號")[0] + "號"
-    else:
-        clean_address = re.sub(r"(\d+[Ff樓]|之\d+|-\d+).*$", "", address)
-    data['address'] = address
-    data['nav_address'] = clean_address.strip()
+    # 1. 價格 (容許萬、W等寫法)
+    all_prices = re.findall(r"(\d{3,5})[\s\n]*(?:萬|W|萬/坪)", text)
+    data['price'] = str(max([int(p) for p in all_prices if int(p) > 100])) if all_prices else ""
     
-    def find_val(keyword, text):
-        match = re.search(rf"{keyword}[:：\s]*([\d\.]+)坪", text)
+    # 建立一個通用的找數值函數
+    def find_val(keywords, txt):
+        match = re.search(rf"(?:{keywords})[:：\s]*([\d\.]+)\s*坪", txt)
         return match.group(1) if match else ""
         
-    data['main'] = find_val("(?:主建物|室內)", full_text)
-    data['sub'] = find_val("附屬建物", full_text)
-    data['public'] = find_val("(?:公\s*設|共有部分)", full_text) 
-    data['parking'] = find_val("車\s*位", full_text)
+    data['total'] = find_val("權狀坪數|總坪數|坪數|權狀", text)
+    data['main'] = find_val("主建物|室內|主建物小計", text)
+    data['sub'] = find_val("附屬建物|陽台|附屬建物小計", text)
+    data['public'] = find_val("公設|共有部分|共同使用小計|公共設施", text)
+    data['parking'] = find_val("車位|車位坪數", text)
     
-    total_match = re.search(r"(?:總坪數|權狀坪數)[:：\s]*([\d\.]+)坪", full_text)
-    data['total'] = total_match.group(1) if total_match else find_val("總坪數", full_text)
-    
-    ratio_match = re.search(r"公設比[:：\s]*([\d\.]+)%", full_text)
+    ratio_match = re.search(r"公設比[:：\s]*([\d\.]+)%", text)
     data['ratio'] = ratio_match.group(1) if ratio_match else ""
     
-    floor_match = re.search(r"總樓層[:：\s]*(\d+)層.*出售樓層[:：\s]*(\d+)層", full_text, re.S)
-    if not floor_match:
-        floor_match = re.search(r"樓層[:：\s]*(\d+)[Ff樓]\s*/\s*(\d+)[Ff樓]", full_text)
-        data['floor'] = f"{floor_match.group(1)}/{floor_match.group(2)} 樓" if floor_match else ""
+    # 樓層 (支援 5F/15F, 5樓/15樓, 5 / 15樓 等寫法)
+    floor_match = re.search(r"(?:樓層|出售樓層|所在樓層)[:：\s]*(\d+|B\d+)[Ff樓層]*\s*/\s*(\d+|B\d+)[Ff樓層]*", text)
+    if floor_match:
+        data['floor'] = f"{floor_match.group(1)}/{floor_match.group(2)} 樓"
     else:
-        data['floor'] = f"{floor_match.group(2)}/{floor_match.group(1)} 樓"
-
-    age_match = re.search(r"(?:屋齡|建築完成日)[:：\s]*([0-9\./年]+)", full_text)
-    data['age'] = age_match.group(1).strip() if age_match else ""
+        floor_match2 = re.search(r"總樓層[:：\s]*(\d+)層.*出售樓層[:：\s]*(\d+)層", text, re.S)
+        data['floor'] = f"{floor_match2.group(2)}/{floor_match2.group(1)} 樓" if floor_match2 else ""
+        
+    age_match = re.search(r"(?:屋齡|建築完成日)[:：\s]*([0-9\.]+)\s*(?:年|個月)?", text)
+    data['age'] = f"{age_match.group(1)}年" if age_match else ""
     
-    fee_match = re.search(r"管理費[:：\s]*([0-9,]+)", full_text)
-    data['fee'] = fee_match.group(1).strip() if fee_match else ""
+    fee_match = re.search(r"管理費[:：\s]*([0-9]+)\s*(?:元|/月|元/月)", text)
+    data['fee'] = fee_match.group(1) if fee_match else ""
     
-    ori_match = re.search(r"(?:座向|面向|朝向)[:：\s]*([座朝東西南北]+)", full_text)
-    data['orientation'] = ori_match.group(1).strip() if ori_match else ""
+    ori_match = re.search(r"(?:座向|面向|朝向)[:：\s]*([座朝東西南北]+)", text)
+    data['orientation'] = ori_match.group(1) if ori_match else ""
+    
+    # 地址尋找優化
+    addr_match = re.search(r"(?:地址|位置|座落|門牌|社區)[:：\s]*([A-Z\u4e00-\u9fa50-9]{5,20}[路街段巷弄號])", text)
+    if addr_match:
+        address = addr_match.group(1)
+    else:
+        tw_match = re.search(r"([A-Z\u4e00-\u9fa5]{2,3}[縣市][A-Z\u4e00-\u9fa5]{2,3}[鄉鎮市區][A-Z\u4e00-\u9fa50-9]{2,20}(?:路|街|段|巷|弄|號))", text)
+        address = tw_match.group(1) if tw_match else ""
+        
+    data['address'] = address
+    if "號" in address:
+        data['nav_address'] = address.split("號")[0] + "號"
+    else:
+        data['nav_address'] = re.sub(r"(\d+[Ff樓]|之\d+|-\d+).*$", "", address)
 
     return data
 
@@ -87,27 +90,45 @@ def process_uploaded_file(file_bytes, file_name):
         full_text = pytesseract.image_to_string(image, lang='chi_tra') 
     return parse_real_estate_text(full_text), full_text
 
-# ✨ 更新：強化版網頁爬蟲 (加入 verify=False 與更擬真的 Headers)
 @st.cache_data
 def process_url(url):
-    # 終極瀏覽器偽裝
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://www.google.com/'
     }
     try:
-        # 強制略過 SSL 驗證 (verify=False)
         res = requests.get(url, headers=headers, timeout=15, verify=False)
         res.raise_for_status()
         soup = BeautifulSoup(res.text, 'html.parser')
         
+        # 1. 抓取網頁 SEO 隱藏標籤
+        meta_text = ""
+        for meta in soup.find_all("meta"):
+            if meta.get("content"):
+                meta_text += meta.get("content") + " "
+                
+        # 2. 抓取 591 隱藏的底層 JSON 資料
+        json_text = ""
+        script_data = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});', res.text)
+        if script_data:
+            json_raw = script_data.group(1)
+            try:
+                json_text = json_raw.encode('utf-8').decode('unicode_escape')
+            except:
+                json_text = json_raw
+                
+        # 3. 移除干擾語法
         for script in soup(["script", "style"]):
             script.extract()
             
-        raw_text = soup.get_text(separator='\n', strip=True)
-        return parse_real_estate_text(raw_text), raw_text
+        # ✨ 關鍵修改：用「空格」取代「換行」，防止文字被切斷
+        raw_text = soup.get_text(separator=' ', strip=True)
+        
+        # 把所有可能藏資料的地方全部接在一起送去解析
+        full_combined_text = raw_text + " " + meta_text + " " + json_text
+        
+        return parse_real_estate_text(full_combined_text), full_combined_text
     except Exception as e:
         return None, str(e)
 
@@ -198,6 +219,11 @@ with col_left:
             st.warning(preview_content)
             
         auto_data, extracted_raw_text = process_uploaded_file(file_bytes, uploaded_file.name)
+        
+        # 如果是圖片上傳，且有抓到文字，可以在這裡用 expander 顯示原始辨識文字方便除錯
+        with st.expander("🕵️‍♂️ 顯示 OCR 原始文字"):
+            st.text(extracted_raw_text)
+            
     else:
         st.info("請於左側輸入網址，或上傳檔案。")
 
