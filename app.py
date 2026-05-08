@@ -17,28 +17,46 @@ def parse_real_estate_text(full_text):
     data = {}
     all_prices = re.findall(r"(\d{3,5})[\s\n售價]*萬", full_text)
     data['price'] = str(max([int(p) for p in all_prices])) if all_prices else ""
+    
     addr_match = re.search(r"(?:物件)?(?:地址|位置|座落|門牌)[:：\s]*(.*?)(?=[\n\(（]|電話|$)", full_text)
     address = addr_match.group(1).strip() if addr_match else ""
     if not address:
         tw_match = re.search(r"([A-Z\u4e00-\u9fa5]{2,3}[縣市][A-Z\u4e00-\u9fa5]{2,3}[鄉鎮市區].+?[路街段].+?號)", full_text)
         address = tw_match.group(1) if tw_match else ""
+        
     if "號" in address:
         clean_address = address.split("號")[0] + "號"
     else:
         clean_address = re.sub(r"(\d+[Ff樓]|之\d+|-\d+).*$", "", address)
     data['address'] = address
     data['nav_address'] = clean_address.strip()
+    
     def find_val(keyword, text):
         match = re.search(rf"{keyword}[:：\s]*([\d\.]+)坪", text)
         return match.group(1) if match else ""
+        
     data['main'] = find_val("主建物", full_text)
     data['sub'] = find_val("附屬建物", full_text)
     data['public'] = find_val("公\s*設", full_text) 
     data['parking'] = find_val("車\s*位", full_text)
     data['total'] = find_val("總坪數", full_text)
-    data['ratio'] = re.search(r"公設比[:：\s]*([\d\.]+)%", full_text).group(1) if re.search(r"公設比[:：\s]*([\d\.]+)%", full_text) else ""
+    
+    ratio_match = re.search(r"公設比[:：\s]*([\d\.]+)%", full_text)
+    data['ratio'] = ratio_match.group(1) if ratio_match else ""
+    
     floor_match = re.search(r"總樓層[:：\s]*(\d+)層.*出售樓層[:：\s]*(\d+)層", full_text, re.S)
     data['floor'] = f"{floor_match.group(2)}/{floor_match.group(1)} 樓" if floor_match else ""
+
+    # ✨ 新增抓取：屋齡、管理費、面向
+    age_match = re.search(r"(?:屋齡|建築完成日)[:：\s]*([0-9\./年]+)", full_text)
+    data['age'] = age_match.group(1).strip() if age_match else ""
+    
+    fee_match = re.search(r"管理費[:：\s]*([0-9,]+)", full_text)
+    data['fee'] = fee_match.group(1).strip() if fee_match else ""
+    
+    ori_match = re.search(r"(?:座向|面向)[:：\s]*([座朝東西南北]+)", full_text)
+    data['orientation'] = ori_match.group(1).strip() if ori_match else ""
+
     return data
 
 def process_uploaded_file(file):
@@ -120,21 +138,31 @@ with col_left:
 
 with col_right:
     st.title("🏠 房仲文案戰鬥面板")
+    
+    # ✨ 更新：1. 確認房屋詳細資訊 (加入新欄位)
     st.header("1. 確認房屋詳細資訊")
     r_col1, r_col2, r_col3 = st.columns(3)
+    
     with r_col1:
         address = st.text_input("📍 物件地址", value=auto_data.get('address', ''))
         nav_base = st.text_input("📍 導航起點", value=auto_data.get('nav_address', ''))
-        price = st.text_input("💰 開價", value=auto_data.get('price', ''))
-        total_area = st.text_input("📐 總坪數", value=auto_data.get('total', ''))
+        price = st.text_input("💰 開價 (萬)", value=auto_data.get('price', ''))
+        property_type = st.selectbox("🏢 建物型態", ["電梯大樓", "華廈", "公寓", "透天厝", "店面", "廠房", "土地"])
+        age = st.text_input("📅 屋齡/完成日", value=auto_data.get('age', ''), placeholder="例如：5年 或 108/05/20")
+        
     with r_col2:
+        total_area = st.text_input("📐 總坪數", value=auto_data.get('total', ''))
         main_area = st.text_input("🏠 主建物", value=auto_data.get('main', ''))
         sub_area = st.text_input("🧺 附屬建物", value=auto_data.get('sub', ''))
-        parking_area = st.text_input("🚗 車位", value=auto_data.get('parking', ''))
-    with r_col3:
         public_area = st.text_input("🏢 公設", value=auto_data.get('public', ''))
-        public_ratio = st.text_input("📊 公設比", value=auto_data.get('ratio', ''))
+        public_ratio = st.text_input("📊 公設比 (%)", value=auto_data.get('ratio', ''))
+        
+    with r_col3:
         floor_info = st.text_input("🏙️ 樓層", value=auto_data.get('floor', ''))
+        orientation = st.text_input("🧭 面向", value=auto_data.get('orientation', ''), placeholder="例如：座南朝北")
+        parking_type = st.selectbox("🅿️ 車位類型", ["無", "坡道平面", "坡道機械", "升降平面", "升降機械", "一樓車庫", "庭院車位"])
+        parking_area = st.text_input("🚗 車位坪數", value=auto_data.get('parking', ''))
+        management_fee = st.text_input("💵 管理費", value=auto_data.get('fee', ''), placeholder="例如：2500元/月")
 
     st.write("---")
     st.header("2. 🗺️ 周邊機能精準搜尋")
@@ -207,9 +235,43 @@ with col_right:
     with con2:
         u_store, u_license = st.text_input("🏪 店名", "捷運樂善直營店"), st.text_input("🪪 字號")
 
+    # ✨ 更新：6. 生成文案 (將新欄位排版進文案中)
     if st.button("✨ 一鍵生成廣告", type="primary"):
         styles = {"溫馨家庭風": ("【這不是賣房子，是為您尋找更好的生活】", "現場的溫度才是房子的靈魂。"), "霸氣尊榮風": ("【頂級視野，專屬品味】", "尊榮感親臨現場方能領略。"), "投資精算風": ("【精準眼光，資產翻倍】", "數字會說話，搶佔增值先機。"), "誠懇務實風": ("【實實在在的好房子】", "陪您挑選最適合的家。")}
         intro, outro = (c_intro, "") if "自訂" in ad_style else styles.get(ad_style)
+        
         adv_txt = "--- ✨ 本案優勢 ---\n" + "\n".join([f"🔥 {a}" for a in advs if a]) + "\n\n" if any(advs) else ""
         ame_txt = "--- 📍 周邊機能 ---\n" + "\n".join([f"✅ {v}" for v in amenity_details.values()]) + "\n\n" if amenity_details else ""
-        st.text_area("結果", f"{intro}\n\n{adv_txt}{ame_txt}--- 🏠 房屋資訊 ---\n📍 總坪數：{total_area}\n📍 主/附/公：{main_area}/{sub_area}/{public_area}\n📍 樓層：{floor_info}\n💰 開價：{price} 萬\n\n{outro}\n\n--- 🙋‍♂️ 聯絡資訊 ---\n📞 {u_phone} ({u_name})\n📲 {u_line}\n\n台灣房屋 {u_store}\n專屬顧問：{u_name} {u_license}\n\n🅣 經紀業：台灣房屋仲介股份有限公司\n🅣 經紀人：康博超 桃市經字第001240號", height=500)
+        
+        # 組合車位文字 (如果有填寫坪數才顯示)
+        parking_text = f"{parking_type} ({parking_area} 坪)" if parking_area else parking_type
+        
+        final_text = f"""
+{intro}
+
+{adv_txt}{ame_txt}--- 🏠 房屋資訊 ---
+📍 型態：{property_type}
+📍 總坪數：{total_area} 坪
+📍 主建物：{main_area} 坪
+📍 附屬建物：{sub_area} 坪
+📍 公設：{public_area} 坪 (公設比約 {public_ratio}%)
+📍 車位：{parking_text}
+📍 樓層：{floor_info}
+📍 屋齡：{age}
+📍 面向：{orientation}
+📍 管理費：{management_fee}
+💰 開價：{price} 萬
+
+{outro}
+
+--- 🙋‍♂️ 聯絡資訊 ---
+📞 {u_phone} ({u_name})
+📲 {u_line}
+
+台灣房屋 {u_store}
+專屬顧問：{u_name} {u_license}
+
+🅣 經紀業：台灣房屋仲介股份有限公司
+🅣 經紀人：康博超 桃市經字第001240號
+"""
+        st.text_area("結果", value=final_text.strip(), height=600)
