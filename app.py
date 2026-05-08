@@ -18,14 +18,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # --- 頁面配置 ---
 st.set_page_config(page_title="昭佑的房仲文案戰鬥面板", layout="wide", initial_sidebar_state="expanded")
 
-# --- 核心數據抓取邏輯 (全面升級版) ---
+# --- 核心數據抓取邏輯 (全面升級版：支援台灣房屋官網格式) ---
 def parse_real_estate_text(full_text):
     data = {}
     
     # 清理干擾符號
     text = full_text.replace(",", "").replace("，", "")
     
-    # 1. 價格 (容許萬、W等寫法)
+    # 1. 價格
     all_prices = re.findall(r"(\d{3,5})[\s\n]*(?:萬|W|萬/坪)", text)
     data['price'] = str(max([int(p) for p in all_prices if int(p) > 100])) if all_prices else ""
     
@@ -34,16 +34,17 @@ def parse_real_estate_text(full_text):
         match = re.search(rf"(?:{keywords})[:：\s]*([\d\.]+)\s*坪", txt)
         return match.group(1) if match else ""
         
-    data['total'] = find_val("權狀坪數|總坪數|坪數|權狀", text)
+    # ✨ 加入台灣房屋官網常用字眼：「建坪」、「登記建坪」
+    data['total'] = find_val("權狀坪數|總坪數|坪數|權狀|建坪|建物總坪數|登記建坪", text)
     data['main'] = find_val("主建物|室內|主建物小計", text)
     data['sub'] = find_val("附屬建物|陽台|附屬建物小計", text)
-    data['public'] = find_val("公設|共有部分|共同使用小計|公共設施", text)
+    data['public'] = find_val("公設|共有部分|共同使用小計|公共設施|公共空間", text)
     data['parking'] = find_val("車位|車位坪數", text)
     
     ratio_match = re.search(r"公設比[:：\s]*([\d\.]+)%", text)
     data['ratio'] = ratio_match.group(1) if ratio_match else ""
     
-    # 樓層 (支援 5F/15F, 5樓/15樓, 5 / 15樓 等寫法)
+    # 樓層 
     floor_match = re.search(r"(?:樓層|出售樓層|所在樓層)[:：\s]*(\d+|B\d+)[Ff樓層]*\s*/\s*(\d+|B\d+)[Ff樓層]*", text)
     if floor_match:
         data['floor'] = f"{floor_match.group(1)}/{floor_match.group(2)} 樓"
@@ -60,13 +61,13 @@ def parse_real_estate_text(full_text):
     ori_match = re.search(r"(?:座向|面向|朝向)[:：\s]*([座朝東西南北]+)", text)
     data['orientation'] = ori_match.group(1) if ori_match else ""
     
-    # 地址尋找優化
-    addr_match = re.search(r"(?:地址|位置|座落|門牌|社區)[:：\s]*([A-Z\u4e00-\u9fa50-9]{5,20}[路街段巷弄號])", text)
-    if addr_match:
-        address = addr_match.group(1)
+    # 地址尋找優化：強力搜尋縣市開頭的完整地址
+    tw_match = re.search(r"([A-Z\u4e00-\u9fa5]{2,3}[縣市][A-Z\u4e00-\u9fa5]{2,3}[鄉鎮市區][A-Z\u4e00-\u9fa50-9]{2,20}(?:路|街|段|巷|弄|號))", text)
+    if tw_match:
+        address = tw_match.group(1)
     else:
-        tw_match = re.search(r"([A-Z\u4e00-\u9fa5]{2,3}[縣市][A-Z\u4e00-\u9fa5]{2,3}[鄉鎮市區][A-Z\u4e00-\u9fa50-9]{2,20}(?:路|街|段|巷|弄|號))", text)
-        address = tw_match.group(1) if tw_match else ""
+        addr_match = re.search(r"(?:地址|位置|座落|門牌|社區)[:：\s]*([A-Z\u4e00-\u9fa50-9]{5,20}[路街段巷弄號])", text)
+        address = addr_match.group(1) if addr_match else ""
         
     data['address'] = address
     if "號" in address:
@@ -93,42 +94,24 @@ def process_uploaded_file(file_bytes, file_name):
 @st.cache_data
 def process_url(url):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
     }
     try:
         res = requests.get(url, headers=headers, timeout=15, verify=False)
         res.raise_for_status()
+        res.encoding = 'utf-8' # 確保中文編碼正確
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 1. 抓取網頁 SEO 隱藏標籤
-        meta_text = ""
-        for meta in soup.find_all("meta"):
-            if meta.get("content"):
-                meta_text += meta.get("content") + " "
-                
-        # 2. 抓取 591 隱藏的底層 JSON 資料
-        json_text = ""
-        script_data = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});', res.text)
-        if script_data:
-            json_raw = script_data.group(1)
-            try:
-                json_text = json_raw.encode('utf-8').decode('unicode_escape')
-            except:
-                json_text = json_raw
-                
-        # 3. 移除干擾語法
-        for script in soup(["script", "style"]):
-            script.extract()
+        # 移除選單、腳註等干擾區域
+        for element in soup(["script", "style", "nav", "footer"]):
+            element.extract()
             
-        # ✨ 關鍵修改：用「空格」取代「換行」，防止文字被切斷
+        # ✨ 讓抓出來的文字之間保持一個空格，防止「建坪」「35坪」黏在一起變成「建坪35坪」導致正則抓不到
         raw_text = soup.get_text(separator=' ', strip=True)
         
-        # 把所有可能藏資料的地方全部接在一起送去解析
-        full_combined_text = raw_text + " " + meta_text + " " + json_text
-        
-        return parse_real_estate_text(full_combined_text), full_combined_text
+        return parse_real_estate_text(raw_text), raw_text
     except Exception as e:
         return None, str(e)
 
@@ -188,7 +171,7 @@ st.sidebar.title("⚙️ 系統設定與輸入")
 api_key = st.sidebar.text_input("🔑 Google Maps API Key", type="password")
 
 st.sidebar.markdown("---")
-target_url = st.sidebar.text_input("🔗 貼上房屋網址 (如 591 連結自動抓取)")
+target_url = st.sidebar.text_input("🔗 貼上房屋網址 (支援台灣房屋官網)")
 st.sidebar.markdown("<div style='text-align: center; color: gray;'>或</div>", unsafe_allow_html=True)
 uploaded_file = st.sidebar.file_uploader("📂 上傳物件資料表", type=['pdf', 'jpg', 'jpeg', 'png'])
 
@@ -200,14 +183,17 @@ with col_left:
     st.header("👁️ 原始資料預覽")
     
     if target_url:
-        with st.spinner("🌐 正在潛入網頁抓取資料中..."):
+        with st.spinner("🌐 正在潛入台灣房屋官網抓取資料中..."):
             auto_data, extracted_raw_text = process_url(target_url)
             if auto_data is not None:
                 st.success("✅ 網址解析完成！已盡量從網頁中萃取數據。")
                 st.info("💡 提示：網頁抓取不會產生圖片預覽，請直接核對右側面板數據。")
                 st.markdown(f"👉 [點擊此處開啟原網頁]({target_url})")
+                
+                with st.expander("🕵️‍♂️ 顯示網頁抓取到的純文字 (除錯用)"):
+                    st.text(extracted_raw_text)
             else:
-                st.error(f"❌ 網址解析失敗，可能是網站阻擋爬蟲。錯誤訊息：{extracted_raw_text}")
+                st.error(f"❌ 網址解析失敗。錯誤訊息：{extracted_raw_text}")
                 
     elif uploaded_file:
         file_bytes = uploaded_file.getvalue()
@@ -220,7 +206,6 @@ with col_left:
             
         auto_data, extracted_raw_text = process_uploaded_file(file_bytes, uploaded_file.name)
         
-        # 如果是圖片上傳，且有抓到文字，可以在這裡用 expander 顯示原始辨識文字方便除錯
         with st.expander("🕵️‍♂️ 顯示 OCR 原始文字"):
             st.text(extracted_raw_text)
             
